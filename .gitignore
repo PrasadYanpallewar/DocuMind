@@ -1,0 +1,86 @@
+# ==========================================
+# DocuMind - Root Git Ignore Configuration
+# ==========================================
+
+# Dependencies
+node_modules/
+**/node_modules/
+.pnp
+.pnp.js
+
+# Python virtual environments & bytecode
+venv/
+**/venv/
+.venv/
+**/.venv/
+env/
+**/env/
+ENV/
+**/__pycache__/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Production / Build outputs
+dist/
+**/dist/
+build/
+**/build/
+out/
+.vite/
+**/.vite/
+*.egg-info/
+
+# Environment files and credentials (never commit sensitive secrets)
+.env
+.env.*
+*.env
+*.env.*
+*.env.txt
+.env.txt
+.env.local
+.env.*.local
+
+# Whitelist environment example templates
+!**/.env.example
+!.env.example
+
+# Uploaded documents and test PDF files
+*.pdf
+backend/uploads/*
+!backend/uploads/.gitkeep
+uploads/
+**/uploads/*
+!**/uploads/.gitkeep
+
+# Certificates, keys, and credentials
+*.pem
+*.key
+*.crt
+*.cert
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Database & local storage
+*.sqlite
+*.sqlite3
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE and Editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
