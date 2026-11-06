@@ -11,6 +11,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const HOST = process.env.HOST || '0.0.0.0';
 
 // Security and utility middleware
 app.use(helmet());
@@ -40,8 +41,8 @@ const startServer = async () => {
       process.exit(1);
     }
 
-    const server = app.listen(PORT, () => {
-      console.log(`DocuMind backend is running on http://localhost:${PORT}`);
+    const server = app.listen(PORT, HOST, () => {
+      console.log(`DocuMind backend is running on http://${HOST}:${PORT}`);
     });
 
     server.on('error', (error) => {
