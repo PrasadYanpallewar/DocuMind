@@ -3,15 +3,24 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const AI_SERVICE_URL = (process.env.AI_SERVICE_URL || 'http://localhost:8000').replace(/\/+$/, '');
+export const getAiServiceUrl = () =>
+  (process.env.AI_SERVICE_URL || 'https://documind-ai-yxgn.onrender.com').replace(/\/+$/, '');
+
+export const AI_SERVICE_URL = getAiServiceUrl();
 
 // Create configured Axios instance for AI service communication
 const aiClient = axios.create({
-  baseURL: AI_SERVICE_URL,
-  timeout: 60000, // 60 seconds timeout for AI generation
+  baseURL: getAiServiceUrl(),
+  timeout: 60000, // 60 seconds timeout for AI generation (accounts for cold starts)
   headers: {
     'Content-Type': 'application/json',
   },
+});
+
+// Ensure any runtime updates to process.env.AI_SERVICE_URL are respected
+aiClient.interceptors.request.use((config) => {
+  config.baseURL = getAiServiceUrl();
+  return config;
 });
 
 /**
@@ -85,8 +94,25 @@ export const chatDocument = async (documentId, question, topK = 5) => {
   }
 };
 
+/**
+ * Checks health status of the configured AI Service.
+ * GET /health
+ *
+ * @returns {Promise<Object>} Operational status object from the AI service
+ */
+export const checkHealth = async () => {
+  try {
+    const response = await aiClient.get('/health');
+    return response.data;
+  } catch (error) {
+    handleAiServiceError(error, 'AI Service health check failed');
+  }
+};
+
 export default {
   processDocument,
   chatDocument,
+  checkHealth,
+  getAiServiceUrl,
   AI_SERVICE_URL,
 };
