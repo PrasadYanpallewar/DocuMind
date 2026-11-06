@@ -28,9 +28,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     Application lifespan context manager handling startup and shutdown events.
     """
-    print("🚀 DocuMind AI Service starting up...")
+    print("[INFO] DocuMind AI Service starting up...")
     yield
-    print("🛑 DocuMind AI Service shutting down...")
+    print("[INFO] DocuMind AI Service shutting down...")
 
 
 # Initialize FastAPI application
@@ -253,5 +253,6 @@ def document_chat_endpoint(
 
 if __name__ == "__main__":
     host: str = os.getenv("HOST", "0.0.0.0")
-    port: int = int(os.getenv("PORT", "8000"))
-    uvicorn.run("app.main:app", host=host, port=port, reload=True)
+    port: int = int(os.getenv("PORT", "10000"))
+    reload_enabled: bool = os.getenv("RELOAD", "false").lower() in ("true", "1")
+    uvicorn.run("app.main:app", host=host, port=port, reload=reload_enabled)
