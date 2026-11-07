@@ -1,5 +1,7 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
 
@@ -8,13 +10,16 @@ export const getAiServiceUrl = () =>
 
 export const AI_SERVICE_URL = getAiServiceUrl();
 
+// Sensible timeout below Render's ~100-second reverse-proxy limit for synchronous requests
+const PROCESS_TIMEOUT_MS = parseInt(process.env.AI_PROCESS_TIMEOUT_MS, 10) || 90000; // 90 seconds
+// Default client timeout for chat and operational requests
+const DEFAULT_TIMEOUT_MS = parseInt(process.env.AI_TIMEOUT_MS, 10) || 45000; // 45 seconds
+
 // Create configured Axios instance for AI service communication
+// NOTE: Do not set default 'Content-Type': 'application/json' here as it conflicts with multipart FormData
 const aiClient = axios.create({
   baseURL: getAiServiceUrl(),
-  timeout: 60000, // 60 seconds timeout for AI generation (accounts for cold starts)
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  timeout: DEFAULT_TIMEOUT_MS,
 });
 
 // Ensure any runtime updates to process.env.AI_SERVICE_URL are respected
@@ -31,14 +36,16 @@ aiClient.interceptors.request.use((config) => {
  */
 const handleAiServiceError = (error, fallbackMessage) => {
   if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+    console.error(`[AI Service Client Error] Unreachable host (${error.code}): ${error.message}`);
     const customErr = new Error('AI Service is currently unreachable. Please ensure the AI service is running.');
     customErr.statusCode = 503;
     customErr.isAiServiceUnavailable = true;
     throw customErr;
   }
 
-  if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
-    const customErr = new Error('AI Service request timed out.');
+  if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || error.message?.includes('timeout')) {
+    console.error(`[AI Service Client Error] Request timed out after ${error.config?.timeout || 'configured'}ms: ${error.message}`);
+    const customErr = new Error('AI Service request timed out. The service may be waking up from cold start on Render or processing a large document.');
     customErr.statusCode = 504;
     throw customErr;
   }
@@ -58,15 +65,49 @@ const handleAiServiceError = (error, fallbackMessage) => {
 };
 
 /**
- * Triggers PDF text extraction, chunking, and vector embedding storage in the AI service.
+ * Triggers document text extraction, chunking, and vector embedding storage in the AI service.
+ * Streams the actual uploaded file bytes via multipart/form-data.
  * POST /api/documents/:documentId/process
  *
  * @param {string} documentId - UUID of the uploaded document
+ * @param {string} [filePath] - Local filesystem path of the uploaded file to forward
+ * @param {string} [originalFilename] - Original filename of the document
  * @returns {Promise<Object>} AI service processing confirmation
  */
-export const processDocument = async (documentId) => {
+export const processDocument = async (documentId, filePath, originalFilename) => {
   try {
-    const response = await aiClient.post(`/api/documents/${documentId}/process`);
+    const targetUrl = `${getAiServiceUrl()}/api/documents/${documentId}/process`;
+    console.log(`[AI Service Client] Forwarding document ${documentId} to ${targetUrl}...`);
+
+    let response;
+    if (filePath && fs.existsSync(filePath)) {
+      const stats = await fs.promises.stat(filePath);
+      const filename = originalFilename || path.basename(filePath);
+      console.log(`[AI Service Client] Reading file for multipart forward: "${filename}" (${stats.size} bytes)`);
+
+      const fileBuffer = await fs.promises.readFile(filePath);
+      const blob = new Blob([fileBuffer]);
+
+      const formData = new FormData();
+      formData.append('file', blob, filename);
+
+      // Do NOT manually specify 'Content-Type': 'multipart/form-data'.
+      // Axios and Node.js FormData automatically construct the multipart boundary header (e.g. multipart/form-data; boundary=...).
+      // Setting Content-Type to undefined guarantees Axios computes the boundary rather than overriding it.
+      response = await aiClient.post(`/api/documents/${documentId}/process`, formData, {
+        headers: {
+          'Content-Type': undefined,
+        },
+        timeout: PROCESS_TIMEOUT_MS,
+      });
+    } else {
+      console.warn(`[AI Service Client] No file path provided or file missing on disk for document ${documentId}. Triggering process without file payload.`);
+      response = await aiClient.post(`/api/documents/${documentId}/process`, null, {
+        timeout: PROCESS_TIMEOUT_MS,
+      });
+    }
+
+    console.log(`[AI Service Client] Processing response for document ${documentId}: status=${response.data?.status || 'unknown'}`);
     return response.data;
   } catch (error) {
     handleAiServiceError(error, `Failed to process document ${documentId}`);
@@ -84,10 +125,19 @@ export const processDocument = async (documentId) => {
  */
 export const chatDocument = async (documentId, question, topK = 5) => {
   try {
-    const response = await aiClient.post(`/api/documents/${documentId}/chat`, {
-      question,
-      top_k: topK,
-    });
+    const response = await aiClient.post(
+      `/api/documents/${documentId}/chat`,
+      {
+        question,
+        top_k: topK,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        timeout: DEFAULT_TIMEOUT_MS,
+      }
+    );
     return response.data;
   } catch (error) {
     handleAiServiceError(error, `Failed to generate chat response for document ${documentId}`);

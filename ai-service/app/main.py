@@ -3,9 +3,10 @@ from pathlib import Path as FilePath
 from typing import AsyncGenerator, Dict, Any, List, Optional
 import os
 import sys
+import tempfile
 import uuid
 import uvicorn
-from fastapi import FastAPI, HTTPException, Path, status
+from fastapi import FastAPI, HTTPException, Path, UploadFile, File, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -105,17 +106,18 @@ async def health_check() -> Dict[str, str]:
     response_model=ProcessDocumentResponse,
     status_code=status.HTTP_200_OK,
     tags=["Documents"],
-    summary="Process PDF document and store vector embeddings",
-    description="Triggers the end-to-end PDF processing pipeline: text extraction, semantic chunking, Gemini 768-dimensional embedding generation, and vector storage in PostgreSQL pgvector.",
+    summary="Process PDF/DOCX/TXT document and store vector embeddings",
+    description="Triggers the end-to-end document processing pipeline: text extraction, semantic chunking, Gemini 768-dimensional embedding generation, and vector storage in PostgreSQL pgvector.",
 )
-def process_document_endpoint(
+async def process_document_endpoint(
     document_id: str = Path(..., description="UUID of the document to process"),
+    file: Optional[UploadFile] = File(None, description="Optional uploaded document file (PDF, DOCX, TXT) forwarded via multipart/form-data"),
 ) -> Dict[str, Any]:
     """
     Triggers the end-to-end processing pipeline for a given document.
 
-    Validates the document ID format, confirms the document exists in PostgreSQL,
-    and runs the text extraction, chunking, Gemini embedding, and vector storage pipeline.
+    Accepts the forwarded document file as multipart/form-data directly,
+    eliminating any dependency on shared filesystem paths between services.
     """
     # 1. Validate UUID format
     if not document_id or not isinstance(document_id, str) or not document_id.strip():
@@ -133,31 +135,63 @@ def process_document_endpoint(
             detail=f"Invalid document ID format: '{cleaned_id}'. A valid UUID is required.",
         )
 
+    has_file = file is not None and bool(getattr(file, "filename", None))
+    print(f"[AI Service] Processing request received for document: {valid_uuid} (file payload attached: {has_file})")
+
     # 2. Check if document exists in database (handle missing document with HTTP 404)
     doc = get_document_by_id(valid_uuid)
     if not doc:
+        print(f"[AI Service ERROR] Document {valid_uuid} not found in database.")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document with ID '{valid_uuid}' not found.",
         )
 
-    # 3. Call the existing process_document_pipeline function
-    result = process_document_pipeline(valid_uuid)
+    temp_path = None
+    try:
+        # If file was forwarded via multipart/form-data, buffer it to a temporary file
+        orig_filename = None
+        if has_file:
+            orig_filename = file.filename or doc.get("filename", "document.pdf")
+            file_suffix = FilePath(orig_filename).suffix or ".pdf"
+            content = await file.read()
+            print(f"[AI Service] File received: {orig_filename} ({len(content)} bytes)")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp_file:
+                tmp_file.write(content)
+                temp_path = tmp_file.name
+            print(f"[AI Service] Temporary file created: {temp_path}")
 
-    # 4. Handle processing failures safely without exposing secrets or internal paths
-    if result.get("status") != "completed":
-        error_msg = result.get("error", "Document processing failed.")
-        if "not found" in error_msg.lower():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=error_msg,
-            )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_msg,
+        # 3. Call process_document_pipeline with forwarded file path
+        result = process_document_pipeline(
+            document_id=valid_uuid,
+            override_file_path=temp_path,
+            override_filename=orig_filename if has_file else None,
         )
 
-    return result
+        # 4. Handle processing failures safely without exposing secrets or internal paths
+        if result.get("status") != "completed":
+            error_msg = result.get("error", "Document processing failed.")
+            print(f"[AI Service ERROR] Processing failed for document {valid_uuid}: {error_msg}")
+            if "not found" in error_msg.lower():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=error_msg,
+                )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=error_msg,
+            )
+
+        print(f"[AI Service SUCCESS] Document {valid_uuid} successfully processed and indexed ({result.get('chunks_stored', 0)} chunks).")
+        return result
+    finally:
+        # Always clean up temporary file
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+                print(f"[AI Service] Temporary file cleaned up: {temp_path}")
+            except OSError as cleanup_err:
+                print(f"[AI Service WARN] Could not remove temp file {temp_path}: {cleanup_err}")
 
 
 @app.post(

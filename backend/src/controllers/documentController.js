@@ -311,30 +311,73 @@ export const uploadDocument = async (req, res) => {
     const result = await pool.query(insertQuery, values);
     const document = result.rows[0];
 
-    // 5. Trigger AI service processing
+    // 5. Trigger AI service processing with multipart file forwarding
     try {
-      await aiService.processDocument(document.id);
-      document.status = 'completed';
-    } catch (aiErr) {
-      console.warn(`[AI Service] Processing notification warning for document ${document.id}:`, aiErr.message);
-      // Upload remains recorded with status 'pending' if AI service is temporarily offline
-    }
+      console.log(`[Upload] Document ${document.id} saved to DB. Forwarding file to AI service for parsing & embeddings...`);
+      const aiResult = await aiService.processDocument(document.id, storagePath, originalname);
 
-    // Return safe document metadata (internal storage_path is omitted for security)
-    return res.status(201).json({
-      status: 'success',
-      message: 'Document uploaded and queued for processing successfully.',
-      data: {
-        document: {
-          id: document.id,
-          filename: document.filename,
-          file_size: document.file_size,
-          mime_type: document.mime_type,
-          status: document.status,
-          created_at: document.created_at,
+      // Validate AI service response: mark as completed ONLY when explicitly status: "completed"
+      if (aiResult && aiResult.status === 'completed') {
+        document.status = 'completed';
+        console.log(`[Upload] AI processing successfully completed for document ${document.id}. Status set to 'completed'.`);
+        return res.status(201).json({
+          status: 'success',
+          message: 'Document uploaded and processed successfully.',
+          data: {
+            document: {
+              id: document.id,
+              filename: document.filename,
+              file_size: document.file_size,
+              mime_type: document.mime_type,
+              status: 'completed',
+              created_at: document.created_at,
+            },
+          },
+        });
+      } else {
+        const failureReason = aiResult?.error || aiResult?.message || 'AI service did not return completed status.';
+        console.warn(`[Upload AI Service Warning] Document ${document.id} processing incomplete:`, failureReason);
+        await pool.query("UPDATE documents SET status = 'failed' WHERE id = $1;", [document.id]);
+        document.status = 'failed';
+        return res.status(201).json({
+          status: 'error',
+          message: `Document uploaded, but processing failed: ${failureReason}`,
+          data: {
+            document: {
+              id: document.id,
+              filename: document.filename,
+              file_size: document.file_size,
+              mime_type: document.mime_type,
+              status: 'failed',
+              created_at: document.created_at,
+            },
+          },
+        });
+      }
+    } catch (aiErr) {
+      console.warn(`[Upload AI Service Warning] Document ${document.id} processing failed:`, aiErr.message);
+      // Mark as failed in DB if processing failed
+      try {
+        await pool.query("UPDATE documents SET status = 'failed' WHERE id = $1;", [document.id]);
+        document.status = 'failed';
+      } catch (dbErr) {
+        console.error('Failed to update document status to failed in DB:', dbErr.message);
+      }
+      return res.status(201).json({
+        status: 'error',
+        message: `Document uploaded, but processing failed: ${aiErr.message || 'AI service processing error'}.`,
+        data: {
+          document: {
+            id: document.id,
+            filename: document.filename,
+            file_size: document.file_size,
+            mime_type: document.mime_type,
+            status: 'failed',
+            created_at: document.created_at,
+          },
         },
-      },
-    });
+      });
+    }
   } catch (error) {
     // If database insertion fails, remove the uploaded file from disk to prevent orphaned files
     if (fs.existsSync(storagePath)) {
