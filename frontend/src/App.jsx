@@ -19,7 +19,9 @@ import {
 
 export default function App() {
   const { isAuthenticated, loading } = useAuth();
-  const [activeNav, setActiveNav] = useState('dashboard');
+  const [activeNav, setActiveNav] = useState(() => {
+    return localStorage.getItem('documind_active_nav') || 'dashboard';
+  });
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [documents, setDocuments] = useState([]);
@@ -27,6 +29,11 @@ export default function App() {
   const [docsError, setDocsError] = useState('');
   const [activeDocForChat, setActiveDocForChat] = useState(null);
   const isFetchingRef = useRef(false);
+
+  // Synchronize active navigation tab with localStorage
+  useEffect(() => {
+    localStorage.setItem('documind_active_nav', activeNav);
+  }, [activeNav]);
 
   // Load user documents without duplicate calls or unnecessary skeleton resets
   const fetchUserDocuments = useCallback(async (isInitial = false) => {
@@ -47,8 +54,13 @@ export default function App() {
       const docs = response?.data?.documents || [];
       setDocuments(docs);
 
-      // Auto-select first document for chat if none selected yet
+      // Restore saved document for chat from localStorage or select first
       setActiveDocForChat((prev) => {
+        const savedDocId = localStorage.getItem('documind_active_doc_id');
+        if (savedDocId && docs.length > 0) {
+          const matched = docs.find((d) => d.id === savedDocId);
+          if (matched) return matched;
+        }
         if (!prev && docs.length > 0) return docs[0];
         if (prev) {
           const matched = docs.find((d) => d.id === prev.id);
@@ -95,6 +107,9 @@ export default function App() {
   const handleOpenChat = (doc) => {
     setActiveDocForChat(doc);
     setActiveNav('ai-assistant');
+    if (doc?.id) {
+      localStorage.setItem('documind_active_doc_id', doc.id);
+    }
   };
 
   // Handle document deletion and synchronize dashboard state
@@ -152,8 +167,8 @@ export default function App() {
         />
 
         {/* Viewport Body */}
-        <main className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 sm:px-6 lg:px-8">
-          <div className="w-full">
+        <main className={`flex-1 ${activeNav === 'ai-assistant' ? 'overflow-hidden flex flex-col p-3 sm:p-5 lg:p-6' : 'overflow-y-auto px-4 py-6 sm:px-6 lg:px-8'} overflow-x-hidden`}>
+          <div className={`w-full ${activeNav === 'ai-assistant' ? 'flex-1 flex flex-col min-h-0' : ''}`}>
             {activeNav === 'dashboard' ? (
               <Dashboard
                 searchQuery={searchQuery}

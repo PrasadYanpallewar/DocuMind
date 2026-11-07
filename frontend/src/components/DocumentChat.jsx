@@ -12,6 +12,7 @@ import {
   CopyIcon,
   CheckIcon,
   PlusIcon,
+  UserIcon,
 } from './icons/Icons';
 
 /**
@@ -66,8 +67,20 @@ export default function DocumentChat({
   const [errorMsg, setErrorMsg] = useState('');
   const [expandedSources, setExpandedSources] = useState({});
   const [copiedId, setCopiedId] = useState(null);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
 
-  const messagesEndRef = useRef(null);
+  const chatContainerRef = useRef(null);
+  const lastUserMessageRef = useRef(null);
+  const prevSendingRef = useRef(false);
+  const prevMsgCountRef = useRef(0);
+
+  // Compute index of the last user message to attach ref for precision viewport positioning
+  const lastUserIdx = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') return i;
+    }
+    return -1;
+  }, [messages]);
 
   // Sync docsList when parent allDocuments updates
   useEffect(() => {
@@ -148,6 +161,34 @@ export default function DocumentChat({
     }
   }, [allDocuments, activeDoc?.id]);
 
+  // Precision scroll: scrolls inner container so the latest question is at the top with AI answer directly below
+  const scrollToLatestConversation = (behavior = 'smooth') => {
+    const container = chatContainerRef.current;
+    if (!container) return;
+
+    const userEl = lastUserMessageRef.current;
+    if (!userEl) {
+      container.scrollTo({ top: container.scrollHeight, behavior });
+      return;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const userRect = userEl.getBoundingClientRect();
+    const relativeTop = userRect.top - containerRect.top + container.scrollTop;
+
+    // Position user's question 16px below top sticky header
+    const targetScroll = Math.max(0, relativeTop - 16);
+    container.scrollTo({ top: targetScroll, behavior });
+  };
+
+  // Scroll listener to toggle the "Jump to latest" floating button
+  const handleScroll = () => {
+    const el = chatContainerRef.current;
+    if (!el) return;
+    const isUp = el.scrollHeight - el.scrollTop - el.clientHeight > 150;
+    setShowScrollBottom(isUp);
+  };
+
   // Load chat history whenever active document changes
   const loadChatHistory = async (docId) => {
     if (!docId) return;
@@ -160,7 +201,14 @@ export default function DocumentChat({
 
       if (data) {
         setActiveConversationId(data.conversation_id || null);
-        setMessages(data.messages || []);
+        // Ensure strictly sorted in ascending chronological order
+        const rawMessages = data.messages || [];
+        const sorted = rawMessages.slice().sort((a, b) => {
+          const tA = new Date(a.created_at || 0).getTime();
+          const tB = new Date(b.created_at || 0).getTime();
+          return tA - tB;
+        });
+        setMessages(sorted);
         setIsNewChatSession(false);
       }
     } catch (err) {
@@ -179,9 +227,43 @@ export default function DocumentChat({
     }
   }, [activeDoc?.id]);
 
-  // Auto-scroll to bottom of chat
+  // Precision conversation scrolling: keeps user's question visible while exposing the answer
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const container = chatContainerRef.current;
+    if (!container || messages.length === 0) return;
+
+    const prevSending = prevSendingRef.current;
+    const prevCount = prevMsgCountRef.current;
+
+    prevSendingRef.current = isSending;
+    prevMsgCountRef.current = messages.length;
+
+    // Case 1: User just submitted a question (isSending became true) -> scroll to bottom to show question + spinner
+    if (isSending && !prevSending) {
+      requestAnimationFrame(() => {
+        container.scrollTo({
+          top: container.scrollHeight,
+          behavior: 'smooth',
+        });
+      });
+      return;
+    }
+
+    // Case 2: AI response completed (isSending transitioned from true to false) -> scroll to align question at top
+    if (!isSending && prevSending) {
+      const timer = setTimeout(() => {
+        scrollToLatestConversation('smooth');
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+
+    // Case 3: Initial chat history load (messages populated from 0 while not sending) -> instant scroll to latest
+    if (!isSending && prevCount === 0 && messages.length > 0) {
+      const timer = setTimeout(() => {
+        scrollToLatestConversation('auto');
+      }, 60);
+      return () => clearTimeout(timer);
+    }
   }, [messages, isSending]);
 
   // Handle switching to a different document
@@ -307,7 +389,7 @@ export default function DocumentChat({
   ];
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)] rounded-3xl border border-slate-800 bg-[#0d121f] shadow-2xl overflow-hidden relative">
+    <div className="flex flex-col flex-1 h-full min-h-[520px] rounded-3xl border border-slate-800 bg-[#0d121f] shadow-2xl overflow-hidden relative">
       {/* Ambient glow decorations */}
       <div className="pointer-events-none absolute -top-20 -right-20 h-64 w-64 rounded-full bg-purple-600/10 blur-3xl" />
       <div className="pointer-events-none absolute -bottom-20 -left-20 h-64 w-64 rounded-full bg-cyan-600/10 blur-3xl" />
@@ -428,7 +510,11 @@ export default function DocumentChat({
       </header>
 
       {/* Chat Messages Body */}
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 z-10">
+      <div
+        ref={chatContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 z-10 scroll-smooth"
+      >
         {/* Loading skeleton */}
         {isLoadingHistory ? (
           <div className="flex flex-col gap-4 py-8 max-w-2xl mx-auto">
@@ -531,26 +617,42 @@ export default function DocumentChat({
           <div className="max-w-3xl mx-auto space-y-4">
             {messages.map((msg, idx) => {
               const isUser = msg.role === 'user';
+              const isLastUser = idx === lastUserIdx;
               const sources = Array.isArray(msg.sources) ? msg.sources : [];
               const isExpanded = !!expandedSources[msg.id || idx];
 
               return (
                 <div
                   key={msg.id || idx}
-                  className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
+                  ref={isLastUser ? lastUserMessageRef : null}
+                  className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} transition-opacity duration-200`}
                 >
                   <div
-                    className={`max-w-[85%] sm:max-w-[78%] rounded-2xl px-4 py-3 text-xs sm:text-sm shadow-md leading-relaxed ${
+                    className={`max-w-[88%] sm:max-w-[80%] rounded-2xl px-4 py-3 text-xs sm:text-sm shadow-md leading-relaxed ${
                       isUser
-                        ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-br-sm'
-                        : 'bg-[#131a2c] text-slate-200 border border-slate-800/90 rounded-bl-sm'
+                        ? 'bg-gradient-to-r from-purple-600 via-purple-700 to-indigo-600 text-white rounded-tr-xs border border-purple-400/30 shadow-purple-900/25'
+                        : 'bg-[#131a2c] text-slate-200 border border-slate-800/90 rounded-tl-xs shadow-slate-950/40'
                     }`}
                   >
+                    {/* Header badge for User Question */}
+                    {isUser && (
+                      <div className="flex items-center justify-end gap-1.5 mb-1.5 pb-1 border-b border-purple-400/20">
+                        <span className="text-[10px] uppercase font-bold tracking-wider text-purple-200/90">
+                          You
+                        </span>
+                        <div className="flex h-4 w-4 items-center justify-center rounded-full bg-purple-500/40 text-purple-200">
+                          <UserIcon className="h-2.5 w-2.5" />
+                        </div>
+                      </div>
+                    )}
+
                     {/* Header badge for Assistant with Copy button */}
                     {!isUser && (
-                      <div className="flex items-center justify-between gap-2 mb-2 pb-1 border-b border-slate-800/60">
+                      <div className="flex items-center justify-between gap-2 mb-2 pb-1.5 border-b border-slate-800/70">
                         <div className="flex items-center gap-1.5 text-[11px] font-semibold text-cyan-300">
-                          <SparklesIcon className="h-3.5 w-3.5" />
+                          <div className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500/20 border border-cyan-500/30 text-cyan-300">
+                            <SparklesIcon className="h-3 w-3" />
+                          </div>
                           <span>Gemini Assistant</span>
                         </div>
                         <button
@@ -577,7 +679,7 @@ export default function DocumentChat({
 
                     {/* Content (Formatted Markdown for AI Assistant, plain text for user) */}
                     {isUser ? (
-                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                      <div className="whitespace-pre-wrap font-medium">{msg.content}</div>
                     ) : (
                       <MarkdownRenderer content={msg.content} />
                     )}
@@ -647,7 +749,7 @@ export default function DocumentChat({
             {/* Awaiting response spinner */}
             {isSending && (
               <div className="flex flex-col items-start">
-                <div className="rounded-2xl rounded-bl-sm border border-slate-800 bg-[#131a2c] px-4 py-3 text-xs text-slate-300 shadow-md flex items-center gap-2.5">
+                <div className="rounded-2xl rounded-tl-xs border border-slate-800 bg-[#131a2c] px-4 py-3 text-xs text-slate-300 shadow-md flex items-center gap-2.5">
                   <SparklesIcon className="h-4 w-4 text-cyan-400 animate-spin" />
                   <span className="text-slate-300">
                     Retrieving document chunks & generating answer...
@@ -655,8 +757,6 @@ export default function DocumentChat({
                 </div>
               </div>
             )}
-
-            <div ref={messagesEndRef} />
           </div>
         )}
       </div>
@@ -673,6 +773,21 @@ export default function DocumentChat({
             <CloseIcon className="h-3.5 w-3.5" />
           </button>
         </div>
+      )}
+
+      {/* Floating Jump to Latest Button */}
+      {showScrollBottom && (
+        <button
+          type="button"
+          onClick={() => scrollToLatestConversation('smooth')}
+          className="absolute bottom-24 right-8 z-20 flex items-center gap-1.5 rounded-full bg-purple-600/90 hover:bg-purple-500 text-white px-3.5 py-2 text-xs font-semibold shadow-lg shadow-purple-900/50 backdrop-blur-sm border border-purple-400/40 transition-all hover:scale-105 active:scale-95"
+          title="Jump to latest exchange"
+        >
+          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+          </svg>
+          <span>Jump to latest</span>
+        </button>
       )}
 
       {/* Chat Input Bar */}
